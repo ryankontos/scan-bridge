@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+:root {
+  color: #18181b;
+  background: #ffffff;
+  font-family:
+    "SF Pro Text",
+    "SF Pro Display",
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #f4f4f5;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #09090b;
+    color: #f4f4f5;
+  }
+}
+
+button,
+input,
+label {
+  font: inherit;
+}
+
+code {
+  font-family:
+    "SF Mono",
+    ui-monospace,
+    "Cascadia Code",
+    "Source Code Pro",
+    Menlo,
+    monospace;
+}

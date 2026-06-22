@@ -1,0 +1,261 @@
+import { createServer } from 'node:http'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import express from 'express'
+import multer from 'multer'
+import { nanoid } from 'nanoid'
+import * as ws from 'ws'
+
+import { runOcr } from './ocr.js'
+import type { OcrProfile } from '../src/types.js'
+
+const { WebSocketServer } = ws
+type WebSocket = ws.WebSocket
+
+type SessionStatus = {
+  sessionId: string
+  desktopConnected: boolean
+  mobileConnected: boolean
+  desktopCount: number
+  mobileCount: number
+  lastActivityAt: string | null
+  ocrProfile: OcrProfile
+}
+
+type SessionRecord = {
+  id: string
+  desktopClients: Set<WebSocket>
+  mobileClients: Set<WebSocket>
+  lastActivityAt: string | null
+  createdAt: number
+  ocrProfile: OcrProfile
+}
+
+type SocketRole = 'desktop' | 'mobile'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const rootDir = join(__dirname, '..')
+const distDir = join(rootDir, 'dist')
+
+const app = express()
+const server = createServer(app)
+const wss = new WebSocketServer({ server, path: '/ws' })
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+  },
+  fileFilter: (_req, file, callback) => {
+    callback(null, file.mimetype.startsWith('image/'))
+  },
+})
+
+const sessions = new Map<string, SessionRecord>()
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000
+const port = Number(process.env.PORT ?? 8787)
+
+function createSession() {
+  const id = nanoid(12)
+  const session: SessionRecord = {
+    id,
+    desktopClients: new Set(),
+    mobileClients: new Set(),
+    lastActivityAt: null,
+    createdAt: Date.now(),
+    ocrProfile: 'macSerial',
+  }
+  sessions.set(id, session)
+  return session
+}
+
+function getSessionStatus(session: SessionRecord): SessionStatus {
+  return {
+    sessionId: session.id,
+    desktopConnected: session.desktopClients.size > 0,
+    mobileConnected: session.mobileClients.size > 0,
+    desktopCount: session.desktopClients.size,
+    mobileCount: session.mobileClients.size,
+    lastActivityAt: session.lastActivityAt,
+    ocrProfile: session.ocrProfile,
+  }
+}
+
+function send(socket: WebSocket, payload: unknown) {
+  if (socket.readyState === socket.OPEN) {
+    socket.send(JSON.stringify(payload))
+  }
+}
+
+function broadcastStatus(session: SessionRecord) {
+  const payload = { type: 'status', payload: getSessionStatus(session) }
+  for (const socket of session.desktopClients) {
+    send(socket, payload)
+  }
+  for (const socket of session.mobileClients) {
+    send(socket, payload)
+  }
+}
+
+function touchSession(session: SessionRecord) {
+  session.lastActivityAt = new Date().toISOString()
+}
+
+function closeAndDeleteSession(id: string) {
+  const session = sessions.get(id)
+  if (!session) {
+    return
+  }
+
+  for (const socket of session.desktopClients) {
+    socket.close(1000, 'Session reset')
+  }
+  for (const socket of session.mobileClients) {
+    socket.close(1000, 'Session reset')
+  }
+
+  sessions.delete(id)
+}
+
+setInterval(() => {
+  const now = Date.now()
+  for (const [id, session] of sessions.entries()) {
+    if (
+      session.desktopClients.size === 0 &&
+      session.mobileClients.size === 0 &&
+      now - session.createdAt > SESSION_TTL_MS
+    ) {
+      sessions.delete(id)
+    }
+  }
+}, 60_000).unref()
+
+app.disable('x-powered-by')
+app.use(express.json())
+
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true })
+})
+
+app.post('/api/session', (_req, res) => {
+  const session = createSession()
+  res.json({ sessionId: session.id })
+})
+
+app.get('/api/session/:sessionId/status', (req, res) => {
+  const sessionId = String(req.params.sessionId)
+  const session = sessions.get(sessionId)
+
+  if (!session) {
+    res.status(404).json({ error: 'Session not found' })
+    return
+  }
+
+  res.json(getSessionStatus(session))
+})
+
+app.delete('/api/session/:sessionId', (req, res) => {
+  closeAndDeleteSession(String(req.params.sessionId))
+  res.status(204).end()
+})
+
+app.put('/api/session/:sessionId/config', (req, res) => {
+  const session = sessions.get(String(req.params.sessionId))
+
+  if (!session) {
+    res.status(404).json({ error: 'Session not found' })
+    return
+  }
+
+  const nextProfile = req.body?.ocrProfile as OcrProfile | undefined
+  if (!nextProfile || !['generic', 'macSerial', 'appleModel'].includes(nextProfile)) {
+    res.status(400).json({ error: 'Invalid OCR profile' })
+    return
+  }
+
+  session.ocrProfile = nextProfile
+  broadcastStatus(session)
+  res.json(getSessionStatus(session))
+})
+
+app.post('/api/session/:sessionId/scan', upload.single('image'), async (req, res) => {
+  const session = sessions.get(String(req.params.sessionId))
+
+  if (!session) {
+    res.status(404).json({ error: 'Session not found. Reset the desktop link and re-pair.' })
+    return
+  }
+
+  if (!req.file?.buffer) {
+    res.status(400).json({ error: 'No image uploaded.' })
+    return
+  }
+
+  try {
+    const result = await runOcr(req.file.buffer, session.ocrProfile)
+    touchSession(session)
+
+    const payload = {
+      id: nanoid(10),
+      sessionId: session.id,
+      receivedAt: session.lastActivityAt ?? new Date().toISOString(),
+      text: result.text,
+      normalizedText: result.normalizedText,
+    }
+
+    const event = { type: 'scan', payload }
+
+    for (const socket of session.desktopClients) {
+      send(socket, event)
+    }
+
+    for (const socket of session.mobileClients) {
+      send(socket, event)
+    }
+
+    broadcastStatus(session)
+    res.json(payload)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'OCR failed'
+    res.status(500).json({ error: message })
+  }
+})
+
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(distDir))
+  app.get(/.*/, (_req, res) => {
+    res.sendFile(join(distDir, 'index.html'))
+  })
+}
+
+wss.on('connection', (socket, request) => {
+  const url = new URL(request.url ?? '', `http://${request.headers.host}`)
+  const sessionId = url.searchParams.get('sessionId')
+  const role = url.searchParams.get('role') as SocketRole | null
+
+  if (!sessionId || (role !== 'desktop' && role !== 'mobile')) {
+    send(socket, { type: 'error', message: 'Invalid socket session' })
+    socket.close(1008, 'Invalid socket session')
+    return
+  }
+
+  const session = sessions.get(sessionId)
+  if (!session) {
+    send(socket, { type: 'error', message: 'Session not found' })
+    socket.close(1008, 'Session not found')
+    return
+  }
+
+  const bucket = role === 'desktop' ? session.desktopClients : session.mobileClients
+  bucket.add(socket)
+  broadcastStatus(session)
+
+  socket.on('close', () => {
+    bucket.delete(socket)
+    broadcastStatus(session)
+  })
+})
+
+server.listen(port, () => {
+  console.log(`Scan Bridge server listening on http://localhost:${port}`)
+})
