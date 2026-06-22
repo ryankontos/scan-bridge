@@ -1,4 +1,4 @@
-import { Camera, Link2, QrCode, RefreshCw, ScanLine, Trash2, Upload } from 'lucide-react'
+import { Camera, Link2, Moon, RefreshCw, ScanLine, Sun, Trash2, Upload } from 'lucide-react'
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 
@@ -34,12 +34,15 @@ type ServerEvent =
 
 type SocketState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'offline'
 type ConnectionState = 'not connected' | 'disconnected' | 'connected'
+type ThemeMode = 'light' | 'dark'
+type UploadQuality = 'fast' | 'balanced' | 'full'
 
 const HISTORY_KEY = 'scan-bridge-history'
 const SESSION_KEY = 'scan-bridge-session'
 const REGEX_KEY = 'scan-bridge-regex'
 const REGEX_PRESET_KEY = 'scan-bridge-regex-preset'
 const OBSERVER_KEY = 'scan-bridge-observer'
+const THEME_KEY = 'scan-bridge-theme'
 const REGEX_PRESETS: Array<{ id: RegexPresetId; label: string; pattern: string }> = [
   { id: 'macSerial', label: 'Mac serial number', pattern: '\\b[A-Z0-9]{8,12}\\b' },
   { id: 'appleModel', label: 'Apple A-number', pattern: '\\bA\\d{4}\\b' },
@@ -90,9 +93,13 @@ function formatTime(value: string | null) {
   return new Date(value).toLocaleString()
 }
 
-async function optimizeImageForUpload(file: Blob) {
+async function optimizeImageForUpload(file: Blob, quality: UploadQuality) {
+  if (quality === 'full') {
+    return file
+  }
+
   const image = await createImageBitmap(file)
-  const maxLongEdge = 1600
+  const maxLongEdge = quality === 'fast' ? 1200 : 1600
   const longEdge = Math.max(image.width, image.height)
   const scale = longEdge > maxLongEdge ? maxLongEdge / longEdge : 1
   const width = Math.max(1, Math.round(image.width * scale))
@@ -116,7 +123,7 @@ async function optimizeImageForUpload(file: Blob) {
   image.close()
 
   const optimizedBlob = await new Promise<Blob | null>((resolve) => {
-    canvas.toBlob(resolve, 'image/jpeg', 0.78)
+    canvas.toBlob(resolve, 'image/jpeg', quality === 'fast' ? 0.66 : 0.8)
   })
 
   if (!optimizedBlob) {
@@ -126,24 +133,17 @@ async function optimizeImageForUpload(file: Blob) {
   return optimizedBlob
 }
 
-function ConnectionIndicator({
-  label,
-  state,
+function AppearanceToggle({
+  theme,
+  onToggle,
 }: {
-  label: string
-  state: ConnectionState
+  theme: ThemeMode
+  onToggle: () => void
 }) {
-  const connected = state === 'connected'
-  const dotClass = connected ? 'bg-emerald-500' : 'bg-red-500'
-
   return (
-    <div className="flex items-center justify-between rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900">
-      <span className="text-sm text-zinc-700 dark:text-zinc-300">{label}</span>
-      <div className="flex items-center gap-2">
-        <span className={`h-2.5 w-2.5 rounded-full ${dotClass}`} />
-        <span className="text-sm font-medium text-zinc-950 dark:text-zinc-50">{state}</span>
-      </div>
-    </div>
+    <Button variant="outline" size="sm" onClick={onToggle} aria-label="Toggle appearance">
+      {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+    </Button>
   )
 }
 
@@ -331,7 +331,13 @@ function useSessionSocket(
   return { status, lastScan, socketError, socketState, hasConnectedOnce, hasPeerConnectedOnce }
 }
 
-function DesktopPage() {
+function DesktopPage({
+  theme,
+  onToggleTheme,
+}: {
+  theme: ThemeMode
+  onToggleTheme: () => void
+}) {
   const [sessionId, setSessionId] = useState<string | null>(() => localStorage.getItem(SESSION_KEY))
   const [history, setHistory] = useState<ScanRecord[]>(() => {
     const raw = localStorage.getItem(HISTORY_KEY)
@@ -363,7 +369,7 @@ function DesktopPage() {
     })
   }
 
-  const { status, socketError, socketState, hasConnectedOnce, hasPeerConnectedOnce } = useSessionSocket(sessionId, 'desktop', appendScan)
+  const { status, socketError, socketState, hasPeerConnectedOnce } = useSessionSocket(sessionId, 'desktop', appendScan)
 
   async function ensureSession(reset = false) {
     setLoadingSession(true)
@@ -507,31 +513,24 @@ function DesktopPage() {
   }
 
   const captureUrl = sessionId ? `${window.location.origin}/capture/${sessionId}` : ''
-  const receiverState = connectionStateFromSocket(socketState, hasConnectedOnce)
-  const scannerState = connectionStateFromPeer(Boolean(status?.mobileConnected), hasPeerConnectedOnce)
+  const connectionState = connectionStateFromPeer(Boolean(status?.mobileConnected), hasPeerConnectedOnce)
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
-      <header className="flex flex-col gap-2">
-        <p className="text-sm font-medium uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-400">Scan Bridge</p>
-        <h1 className="text-3xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">Desktop receiver</h1>
-        <p className="max-w-3xl text-sm text-zinc-600 dark:text-zinc-400">
-          Pair an iPhone, capture serial numbers, OCR them on the server, and keep the recent scans in
-          this browser until you clear them.
-        </p>
-      </header>
+      <div className="flex justify-end">
+        <AppearanceToggle theme={theme} onToggle={onToggleTheme} />
+      </div>
 
       <section className="grid gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
         <div className="space-y-6">
           <Card>
             <CardHeader className="gap-3">
-              <div>
-                <CardTitle>Setup</CardTitle>
-                <CardDescription>Scan the QR code on your phone and keep this page open.</CardDescription>
-              </div>
-              <div className="grid gap-2">
-                <ConnectionIndicator label="receiver" state={receiverState} />
-                <ConnectionIndicator label="scanner" state={scannerState} />
+              <div className="flex items-center justify-between gap-3">
+                <CardTitle>Connection</CardTitle>
+                <div className="flex items-center gap-2">
+                  <span className={connectionState === 'connected' ? 'h-2.5 w-2.5 rounded-full bg-emerald-500' : 'h-2.5 w-2.5 rounded-full bg-red-500'} />
+                  <span className="text-sm font-medium text-zinc-950 dark:text-zinc-50">{connectionState}</span>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -544,10 +543,6 @@ function DesktopPage() {
               </div>
 
               <div className="grid gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
-                <div className="flex items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                  <QrCode className="h-4 w-4" />
-                  Open scanner
-                </div>
                 {qrCode ? (
                   <img
                     src={qrCode}
@@ -559,8 +554,11 @@ function DesktopPage() {
                     Generating QR code
                   </div>
                 )}
+                <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                  Scan this QR code on your device with a camera to connect.
+                </p>
                 <Input value={captureUrl} readOnly />
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">If the scanner disconnects, rescan this QR code to reconnect.</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">Rescan the QR code any time to reconnect.</p>
               </div>
 
               <div className="grid gap-2">
@@ -589,7 +587,7 @@ function DesktopPage() {
               <div className="text-xs text-zinc-500 dark:text-zinc-400">
                 Last activity: {formatTime(status?.lastActivityAt ?? null)}
               </div>
-              {socketError ? <p className="text-sm text-red-600">{socketError}</p> : null}
+              {socketState !== 'connected' && socketError ? <p className="text-xs text-red-600">{socketError}</p> : null}
             </CardContent>
           </Card>
 
@@ -667,12 +665,19 @@ function DesktopPage() {
   )
 }
 
-function MobilePage() {
+function MobilePage({
+  theme,
+  onToggleTheme,
+}: {
+  theme: ThemeMode
+  onToggleTheme: () => void
+}) {
   const { sessionId = '' } = useParams()
   const { status, lastScan, socketError, socketState, hasConnectedOnce, hasPeerConnectedOnce } = useSessionSocket(sessionId, 'mobile')
   const [cameraReady, setCameraReady] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [uploadQuality, setUploadQuality] = useState<UploadQuality>('fast')
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -710,7 +715,7 @@ function MobilePage() {
     try {
       let uploadBlob = blob
       try {
-        uploadBlob = await optimizeImageForUpload(blob)
+        uploadBlob = await optimizeImageForUpload(blob, uploadQuality)
       } catch {
         uploadBlob = blob
       }
@@ -774,29 +779,32 @@ function MobilePage() {
 
   const scannerState = connectionStateFromSocket(socketState, hasConnectedOnce)
   const receiverState = connectionStateFromPeer(Boolean(status?.desktopConnected), hasPeerConnectedOnce)
+  const connectionState =
+    scannerState === 'connected' && receiverState === 'connected'
+      ? 'connected'
+      : scannerState !== 'not connected' || receiverState !== 'not connected'
+        ? 'disconnected'
+        : 'not connected'
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-lg flex-col gap-4 px-4 py-5">
-      <header className="space-y-2">
-        <p className="text-sm font-medium uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-400">Scan Bridge</p>
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">Phone capture</h1>
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">Capture a label and send it straight to the paired desktop session.</p>
-      </header>
+      <div className="flex justify-end">
+        <AppearanceToggle theme={theme} onToggle={onToggleTheme} />
+      </div>
 
       <Card>
         <CardHeader className="gap-3">
-          <div>
+          <div className="flex items-center justify-between gap-3">
             <CardTitle>Connection</CardTitle>
-            <CardDescription>Session {sessionId}</CardDescription>
-          </div>
-          <div className="grid gap-2">
-            <ConnectionIndicator label="scanner" state={scannerState} />
-            <ConnectionIndicator label="receiver" state={receiverState} />
+            <div className="flex items-center gap-2">
+              <span className={connectionState === 'connected' ? 'h-2.5 w-2.5 rounded-full bg-emerald-500' : 'h-2.5 w-2.5 rounded-full bg-red-500'} />
+              <span className="text-sm font-medium text-zinc-950 dark:text-zinc-50">{connectionState}</span>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
           <div>Last OCR push: {formatTime(status?.lastActivityAt ?? null)}</div>
-          {receiverState !== 'connected' ? <div>Rescan the QR code on the desktop to reconnect.</div> : null}
+          {connectionState !== 'connected' ? <div>Rescan the QR code on the desktop to reconnect.</div> : null}
           {socketError ? <p className="text-red-600">{socketError}</p> : null}
         </CardContent>
       </Card>
@@ -804,7 +812,7 @@ function MobilePage() {
       <Card>
         <CardHeader>
           <CardTitle>Capture</CardTitle>
-          <CardDescription>Use live camera capture or upload a photo from the camera roll.</CardDescription>
+          <CardDescription>Use live camera capture or upload a photo.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="overflow-hidden rounded-xl border border-zinc-200 bg-zinc-950 dark:border-zinc-800">
@@ -816,6 +824,20 @@ function MobilePage() {
                 <p className="max-w-56 text-sm">Start the rear camera for fast repeat scanning, or upload a photo below.</p>
               </div>
             )}
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="quality-mode">Image quality</Label>
+            <select
+              id="quality-mode"
+              value={uploadQuality}
+              onChange={(event) => setUploadQuality(event.target.value as UploadQuality)}
+              className="flex h-10 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-950/20 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-50 dark:focus-visible:ring-zinc-50/20"
+            >
+              <option value="fast">Reduced quality</option>
+              <option value="balanced">Balanced</option>
+              <option value="full">Full size</option>
+            </select>
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -881,12 +903,29 @@ function MissingCaptureRoute() {
 
 function App() {
   const isCaptureRoute = useMemo(() => window.location.pathname.startsWith('/capture/'), [])
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    const storedTheme = localStorage.getItem(THEME_KEY)
+    if (storedTheme === 'light' || storedTheme === 'dark') {
+      return storedTheme
+    }
+
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  })
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark')
+    localStorage.setItem(THEME_KEY, theme)
+  }, [theme])
+
+  function toggleTheme() {
+    setTheme((current) => (current === 'dark' ? 'light' : 'dark'))
+  }
 
   return (
     <div className={isCaptureRoute ? 'bg-zinc-100 text-zinc-950 dark:bg-zinc-900 dark:text-zinc-50' : 'bg-white text-zinc-950 dark:bg-zinc-950 dark:text-zinc-50'}>
       <Routes>
-        <Route path="/" element={<DesktopPage />} />
-        <Route path="/capture/:sessionId" element={<MobilePage />} />
+        <Route path="/" element={<DesktopPage theme={theme} onToggleTheme={toggleTheme} />} />
+        <Route path="/capture/:sessionId" element={<MobilePage theme={theme} onToggleTheme={toggleTheme} />} />
         <Route path="*" element={<MissingCaptureRoute />} />
       </Routes>
     </div>
