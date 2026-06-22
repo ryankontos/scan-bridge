@@ -117,6 +117,14 @@ function normalizeClientText(text: string) {
   return text.replace(/\s+/g, ' ').trim()
 }
 
+function getVisibleSocketError(error: string | null) {
+  if (!error || error === 'Link closed' || error === 'Session not found') {
+    return null
+  }
+
+  return error
+}
+
 async function optimizeImageForUpload(file: Blob, quality: UploadQuality) {
   if (quality === 'full') {
     return file
@@ -691,6 +699,7 @@ function DesktopPage({
 
   const captureUrl = sessionId ? `${window.location.origin}/capture/${sessionId}` : ''
   const connectionState = connectionStateFromPeer(Boolean(status?.mobileConnected), hasPeerConnectedOnce)
+  const visibleSocketError = getVisibleSocketError(socketError)
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
@@ -767,7 +776,7 @@ function DesktopPage({
               <div className="text-xs text-zinc-500 dark:text-zinc-400">
                 Last activity: {formatTime(status?.lastActivityAt ?? null)}
               </div>
-              {socketState !== 'connected' && socketError ? <p className="text-xs text-red-600">{socketError}</p> : null}
+              {socketState !== 'connected' && visibleSocketError ? <p className="text-xs text-red-600">{visibleSocketError}</p> : null}
               {pendingScan ? <p className="text-xs text-zinc-500 dark:text-zinc-400">Phone review pending</p> : null}
             </CardContent>
           </Card>
@@ -1101,6 +1110,7 @@ function MobilePage({
       : scannerState !== 'not connected' || receiverState !== 'not connected'
         ? 'disconnected'
         : 'not connected'
+  const visibleSocketError = getVisibleSocketError(socketError)
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-lg flex-col gap-4 px-4 py-5">
@@ -1121,7 +1131,7 @@ function MobilePage({
         <CardContent className="space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
           <div>Last OCR push: {formatTime(status?.lastActivityAt ?? null)}</div>
           {connectionState !== 'connected' ? <div>Rescan the QR code on the desktop to reconnect.</div> : null}
-          {socketError ? <p className="text-red-600">{socketError}</p> : null}
+          {visibleSocketError ? <p className="text-red-600">{visibleSocketError}</p> : null}
         </CardContent>
       </Card>
 
