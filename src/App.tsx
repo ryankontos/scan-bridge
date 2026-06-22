@@ -1217,13 +1217,15 @@ function MobilePage({
       </Card>
 
       {reviewBeforeSend ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Preview</CardTitle>
-            <CardDescription>Confirm this OCR result before it is sent to the desktop.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="fixed inset-0 z-50 flex items-end bg-black/45 p-3 sm:items-center sm:justify-center sm:p-6">
+          <div className="w-full max-w-xl rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
+            <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-4 py-4 dark:border-zinc-800">
+              <div>
+                <h2 className="text-base font-semibold text-zinc-950 dark:text-zinc-50">Review scan</h2>
+                <p className="text-sm text-zinc-500 dark:text-zinc-400">Confirm or edit this before it reaches the desktop.</p>
+              </div>
+            </div>
+            <div className="max-h-[70vh] space-y-4 overflow-y-auto px-4 py-4">
               <div className="grid gap-2">
                 <Label htmlFor="pending-regex-result">Regex result</Label>
                 <Input
@@ -1236,14 +1238,13 @@ function MobilePage({
               </div>
               {pendingScan ? (
                 <>
-                  <Separator className="my-3" />
                   <div className="grid gap-2">
                     <Label htmlFor="pending-ocr-text">OCR text</Label>
                     <textarea
                       id="pending-ocr-text"
                       value={pendingDraftText}
                       onChange={(event) => setPendingDraftText(event.target.value)}
-                      className="min-h-32 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 font-mono text-sm text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-950/20 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-50 dark:focus-visible:ring-zinc-50/20"
+                      className="min-h-36 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 font-mono text-sm text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-950/20 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-50 dark:focus-visible:ring-zinc-50/20"
                     />
                   </div>
                   <p className="rounded-md border border-dashed border-zinc-200 px-3 py-2 font-mono text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
@@ -1257,7 +1258,7 @@ function MobilePage({
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">No pending preview yet.</p>
               )}
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3 border-t border-zinc-200 px-4 py-4 dark:border-zinc-800">
               <Button onClick={() => void confirmPendingScan()} disabled={!pendingScan || confirming}>
                 {confirming ? 'Working...' : 'Confirm send'}
               </Button>
@@ -1265,8 +1266,8 @@ function MobilePage({
                 Discard
               </Button>
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       ) : null}
 
       <Card>

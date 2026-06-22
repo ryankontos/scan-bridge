@@ -84,6 +84,35 @@ function stripCompactedLabelPrefixes(value: string) {
   return value.replace(/^(?:SERIALNUMBER|SERIALNO|SERIALNUM|SERIAL|MODEL|PART|IMEI|EMC|SKU)+/i, '')
 }
 
+function tokenizeAlphaNumeric(value: string) {
+  return value
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/g)
+    .map((token) => token.trim())
+    .filter(Boolean)
+}
+
+function buildTokenCandidates(value: string, maxJoin = 3) {
+  const tokens = tokenizeAlphaNumeric(value)
+  const candidates: string[] = []
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    for (let size = 1; size <= maxJoin && index + size <= tokens.length; size += 1) {
+      const candidate = tokens.slice(index, index + size).join('')
+      if (candidate.length >= 4 && candidate.length <= 14) {
+        candidates.push(candidate)
+      }
+    }
+  }
+
+  return unique(candidates)
+}
+
+function extractLabelWindow(text: string, labelPattern: RegExp) {
+  const match = text.match(labelPattern)
+  return match?.[1]?.trim() ?? null
+}
+
 function normalizeAppleModelCandidate(value: string) {
   const compact = value.toUpperCase().replace(/[^A-Z0-9]/g, '')
   if (!compact.startsWith('A') || compact.length < 5) {
@@ -95,8 +124,15 @@ function normalizeAppleModelCandidate(value: string) {
 }
 
 function extractAppleModelCandidate(text: string) {
-  const compact = stripLabelPrefixes(text).toUpperCase().replace(/[^A-Z0-9]/g, '')
-  const matches = compact.match(/A[A-Z0-9]{4}/g) ?? []
+  const stripped = stripLabelPrefixes(text)
+  const labelWindow = extractLabelWindow(stripped, /\bmodel\b[:#\s-]*([A-Z0-9\s-]{1,20})/i)
+  const searchValues = unique([
+    stripped,
+    labelWindow ?? '',
+    ...buildTokenCandidates(stripped),
+    ...(labelWindow ? buildTokenCandidates(labelWindow) : []),
+  ]).filter(Boolean)
+  const matches = searchValues.flatMap((value) => value.toUpperCase().replace(/[^A-Z0-9]/g, '').match(/A[A-Z0-9]{4}/g) ?? [])
 
   for (const match of matches) {
     const candidate = normalizeAppleModelCandidate(match)
@@ -112,9 +148,16 @@ function scoreMacSerialCandidate(value: string) {
   let score = value.length * 10
   if (/[A-Z]/.test(value) && /\d/.test(value)) {
     score += 30
+  } else {
+    score -= 40
   }
 
   score += (value.match(/\d/g) ?? []).length * 2
+  score += (value.match(/[A-Z]/g) ?? []).length
+
+  if ((value.match(/\d/g) ?? []).length < 2) {
+    score -= 20
+  }
 
   if (value.length >= 10) {
     score += 10
@@ -129,24 +172,51 @@ function scoreMacSerialCandidate(value: string) {
 
 function extractMacSerialCandidate(text: string) {
   const stripped = stripLabelPrefixes(text).toUpperCase()
-  const compact = stripCompactedLabelPrefixes(stripped.replace(/[^A-Z0-9]/g, ''))
-  const spacedCompact = compact.replace(/[^A-Z0-9]/g, ' ')
-  const correctedCompact = normalizeSerialCandidate(compact)
-  const candidates = unique([
-    ...(spacedCompact.match(/\b[A-Z0-9]{8,12}\b/g) ?? []).map((candidate) => ({
-      candidate,
-      corrected: false,
-    })),
-    ...(correctedCompact.match(/[A-Z0-9]{8,12}/g) ?? []).map((candidate) => ({
-      candidate,
-      corrected: true,
-    })),
-  ])
+  const labelWindow = extractLabelWindow(stripped, /\b(?:serial(?:\s*(?:number|no))?|s\/n|sn)\b[:#\s-]*([A-Z0-9\s-]{4,32})/i)
+  const searchValues = unique([
+    stripped,
+    labelWindow ?? '',
+    ...buildTokenCandidates(stripped),
+    ...(labelWindow ? buildTokenCandidates(labelWindow) : []),
+  ]).filter(Boolean)
+
+  const candidates = unique(
+    searchValues.flatMap((value) => {
+      const labelBoost = labelWindow && value.includes(labelWindow) ? 18 : 0
+      return (value.match(/\b[A-Z0-9]{8,12}\b/g) ?? []).flatMap((candidate) => {
+        const correctedCandidate = normalizeSerialCandidate(stripCompactedLabelPrefixes(candidate))
+        const rawDigitCount = (candidate.match(/\d/g) ?? []).length
+        const canCorrect = rawDigitCount >= 2 || labelBoost > 0
+
+        return [
+          {
+            candidate,
+            corrected: false,
+            labelBoost,
+          },
+          ...(canCorrect && correctedCandidate.length >= 8 && correctedCandidate.length <= 12 && correctedCandidate !== candidate
+            ? [
+                {
+                  candidate: correctedCandidate,
+                  corrected: true,
+                  labelBoost,
+                },
+              ]
+            : []),
+        ]
+      })
+    }),
+  )
 
   const ranked = candidates
-    .map(({ candidate, corrected }) => ({
+    .filter(({ candidate }) => {
+      const digitCount = (candidate.match(/\d/g) ?? []).length
+      const letterCount = (candidate.match(/[A-Z]/g) ?? []).length
+      return digitCount >= 2 && letterCount >= 2
+    })
+    .map(({ candidate, corrected, labelBoost }) => ({
       candidate,
-      score: scoreMacSerialCandidate(candidate) + (corrected ? 6 : 0),
+      score: scoreMacSerialCandidate(candidate) + (corrected ? 6 : 0) + labelBoost,
     }))
     .sort((left, right) => right.score - left.score)
 
