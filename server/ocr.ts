@@ -77,7 +77,7 @@ function normalizeDigits(value: string) {
 }
 
 function normalizeSerialCandidate(value: string) {
-  return value.replace(/[OQ]/g, '0').replace(/[IL]/g, '1').replace(/Z/g, '2')
+  return value.replace(/O/g, '0').replace(/[IL]/g, '1').replace(/Z/g, '2')
 }
 
 function stripCompactedLabelPrefixes(value: string) {
@@ -209,10 +209,11 @@ function extractMacSerialCandidate(text: string) {
   )
 
   const ranked = candidates
-    .filter(({ candidate }) => {
+    .filter(({ candidate, labelBoost }) => {
       const digitCount = (candidate.match(/\d/g) ?? []).length
       const letterCount = (candidate.match(/[A-Z]/g) ?? []).length
-      return digitCount >= 2 && letterCount >= 2
+      const isStrongLabelCandidate = labelBoost >= 18 && candidate.length >= 8 && letterCount >= 6
+      return ((digitCount >= 2) || isStrongLabelCandidate) && letterCount >= 2
     })
     .map(({ candidate, corrected, labelBoost }) => ({
       candidate,

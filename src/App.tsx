@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './com
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Separator } from './components/ui/separator'
+import { extractPresetMatch } from './lib/scan-extract'
 import type { OcrProfile, RegexPresetId, ScanPayload, SessionConfig, SessionStatus } from './types'
 
 type ScanRecord = ScanPayload & {
@@ -69,20 +70,6 @@ function getOcrProfileForPreset(presetId: RegexPresetId): OcrProfile {
       return 'appleModel'
     default:
       return 'generic'
-  }
-}
-
-function applyRegex(text: string, pattern: string): string | null {
-  if (!pattern.trim()) {
-    return null
-  }
-
-  try {
-    const regex = new RegExp(pattern, 'g')
-    const match = text.match(regex)
-    return match?.[0] ?? null
-  } catch {
-    return null
   }
 }
 
@@ -507,6 +494,7 @@ function DesktopPage({
   const [qrCode, setQrCode] = useState('')
   const [loadingSession, setLoadingSession] = useState(false)
   const regexRef = useRef(regex)
+  const regexPresetIdRef = useRef(regexPresetId)
   const latestScan = history[0] ?? null
 
   function appendScan(scan: ScanPayload) {
@@ -515,16 +503,16 @@ function DesktopPage({
         return current
       }
 
-      const extracted = applyRegex(scan.normalizedText, regexRef.current)
+      const extracted = extractPresetMatch(scan, regexPresetIdRef.current, regexRef.current)
       return [{ ...scan, extracted }, ...current].slice(0, 100)
     })
   }
 
-  function rebuildHistoryForRegex(nextRegex: string) {
+  function rebuildHistoryForConfig(nextRegex: string, nextPresetId: RegexPresetId) {
     setHistory((current) =>
       current.map((scan) => ({
         ...scan,
-        extracted: applyRegex(scan.normalizedText, nextRegex),
+        extracted: extractPresetMatch(scan, nextPresetId, nextRegex),
       })),
     )
   }
@@ -596,6 +584,10 @@ function DesktopPage({
   }, [regex])
 
   useEffect(() => {
+    regexPresetIdRef.current = regexPresetId
+  }, [regexPresetId])
+
+  useEffect(() => {
     if (!status) {
       return
     }
@@ -604,7 +596,7 @@ function DesktopPage({
       setRegex((current) => (current === status.regex ? current : status.regex))
       setRegexPresetId((current) => (current === status.regexPresetId ? current : status.regexPresetId))
       setReviewBeforeSend((current) => (current === status.reviewBeforeSend ? current : status.reviewBeforeSend))
-      rebuildHistoryForRegex(status.regex)
+      rebuildHistoryForConfig(status.regex, status.regexPresetId)
 
       try {
         if (status.regex.trim()) {
@@ -672,7 +664,7 @@ function DesktopPage({
     } catch {
       setRegexError('Invalid regex')
     }
-    rebuildHistoryForRegex(value)
+    rebuildHistoryForConfig(value, nextPresetId)
     void syncConfig(buildSessionConfig(value, nextPresetId, reviewBeforeSend))
   }
 
@@ -683,11 +675,12 @@ function DesktopPage({
     if (preset && preset.pattern) {
       setRegex(preset.pattern)
       setRegexError(null)
-      rebuildHistoryForRegex(preset.pattern)
+      rebuildHistoryForConfig(preset.pattern, nextPresetId)
       void syncConfig(buildSessionConfig(preset.pattern, nextPresetId, reviewBeforeSend))
       return
     }
 
+    rebuildHistoryForConfig(regex, nextPresetId)
     void syncConfig(buildSessionConfig(regex, nextPresetId, reviewBeforeSend))
   }
 
@@ -907,13 +900,13 @@ function MobilePage({
   useEffect(() => {
     const syncTimer = window.setTimeout(() => {
       setPendingDraftText(pendingScan?.text ?? '')
-      setPendingDraftRegexResult(pendingScan ? applyRegex(pendingScan.normalizedText, regex) ?? '' : '')
+      setPendingDraftRegexResult(pendingScan ? extractPresetMatch(pendingScan, regexPresetId, regex) ?? '' : '')
     }, 0)
 
     return () => {
       window.clearTimeout(syncTimer)
     }
-  }, [pendingScan, regex])
+  }, [pendingScan, regex, regexPresetId])
 
   useEffect(() => {
     return () => {
@@ -1098,7 +1091,7 @@ function MobilePage({
     }
   }
 
-  const pendingExtracted = pendingScan ? applyRegex(pendingScan.normalizedText, regex) : null
+  const pendingExtracted = pendingScan ? extractPresetMatch(pendingScan, regexPresetId, regex) : null
   const previewRegexResult = pendingDraftRegexResult || pendingExtracted || ''
   const previewNormalizedText = normalizeClientText(`${previewRegexResult} ${pendingDraftText}`)
 
