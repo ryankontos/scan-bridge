@@ -7,6 +7,11 @@ struct OcrPayload: Codable {
   let lines: [String]
 }
 
+struct LineBucket {
+  var centerY: CGFloat
+  var items: [VNRecognizedTextObservation]
+}
+
 func fail(_ message: String) -> Never {
   FileHandle.standardError.write(Data("\(message)\n".utf8))
   exit(1)
@@ -46,6 +51,43 @@ func sortObservations(_ observations: [VNRecognizedTextObservation]) -> [VNRecog
   }
 }
 
+func groupObservationsIntoLines(_ observations: [VNRecognizedTextObservation]) -> [String] {
+  var buckets: [LineBucket] = []
+
+  for observation in sortObservations(observations) {
+    let centerY = observation.boundingBox.midY
+
+    if let index = buckets.firstIndex(where: { abs($0.centerY - centerY) <= 0.035 }) {
+      buckets[index].items.append(observation)
+      let updatedCount = CGFloat(buckets[index].items.count)
+      buckets[index].centerY = ((buckets[index].centerY * (updatedCount - 1)) + centerY) / updatedCount
+      continue
+    }
+
+    buckets.append(LineBucket(centerY: centerY, items: [observation]))
+  }
+
+  return buckets
+    .sorted { $0.centerY > $1.centerY }
+    .compactMap { bucket -> String? in
+      let line = bucket.items
+        .sorted { $0.boundingBox.minX < $1.boundingBox.minX }
+        .compactMap { observation -> String? in
+          guard let candidate = observation.topCandidates(1).first else {
+            return nil
+          }
+
+          let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+          return text.isEmpty ? nil : text
+        }
+        .joined(separator: " ")
+        .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+      return line.isEmpty ? nil : line
+    }
+}
+
 guard let inputPath = argumentValue(named: "--input") else {
   fail("Missing required argument: --input /path/to/image")
 }
@@ -69,15 +111,8 @@ do {
   let handler = VNImageRequestHandler(cgImage: image, options: [:])
   try handler.perform([request])
 
-  let observations = sortObservations(request.results ?? [])
-  let lines = observations.compactMap { observation -> String? in
-    guard let candidate = observation.topCandidates(1).first else {
-      return nil
-    }
-
-    let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
-    return text.isEmpty ? nil : text
-  }
+  let observations = request.results ?? []
+  let lines = groupObservationsIntoLines(observations)
 
   let payload = OcrPayload(
     text: lines.joined(separator: "\n"),

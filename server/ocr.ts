@@ -49,8 +49,39 @@ function unique<T>(values: T[]) {
   return [...new Set(values)]
 }
 
+function buildLineWindows(lines: string[], maxWindowSize = 4) {
+  const cleanLines = lines.map((line) => normalizeText(line)).filter(Boolean)
+  const windows: string[] = []
+
+  for (let start = 0; start < cleanLines.length; start += 1) {
+    for (let size = 1; size <= maxWindowSize && start + size <= cleanLines.length; size += 1) {
+      const slice = cleanLines.slice(start, start + size)
+      windows.push(slice.join(' '))
+      windows.push(slice.join(''))
+      windows.push(slice.join(' | '))
+    }
+  }
+
+  return unique(windows)
+}
+
+function stripLabelPrefixes(value: string) {
+  return value
+    .replace(/\b(?:serial(?:\s*(?:number|no))?|model|part|imei|emc|sku)\b[:#]?\s*/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 function normalizeDigits(value: string) {
   return value.replace(/[OQD]/g, '0').replace(/[IL]/g, '1').replace(/S/g, '5').replace(/Z/g, '2').replace(/B/g, '8')
+}
+
+function normalizeSerialCandidate(value: string) {
+  return value.replace(/[OQ]/g, '0').replace(/[IL]/g, '1').replace(/Z/g, '2')
+}
+
+function stripCompactedLabelPrefixes(value: string) {
+  return value.replace(/^(?:SERIALNUMBER|SERIALNO|SERIALNUM|SERIAL|MODEL|PART|IMEI|EMC|SKU)+/i, '')
 }
 
 function normalizeAppleModelCandidate(value: string) {
@@ -64,7 +95,7 @@ function normalizeAppleModelCandidate(value: string) {
 }
 
 function extractAppleModelCandidate(text: string) {
-  const compact = text.toUpperCase().replace(/[^A-Z0-9]/g, '')
+  const compact = stripLabelPrefixes(text).toUpperCase().replace(/[^A-Z0-9]/g, '')
   const matches = compact.match(/A[A-Z0-9]{4}/g) ?? []
 
   for (const match of matches) {
@@ -83,6 +114,8 @@ function scoreMacSerialCandidate(value: string) {
     score += 30
   }
 
+  score += (value.match(/\d/g) ?? []).length * 2
+
   if (value.length >= 10) {
     score += 10
   }
@@ -95,13 +128,25 @@ function scoreMacSerialCandidate(value: string) {
 }
 
 function extractMacSerialCandidate(text: string) {
-  const compact = text.toUpperCase().replace(/[^A-Z0-9]/g, ' ')
-  const matches = unique(compact.match(/\b[A-Z0-9]{8,12}\b/g) ?? [])
-
-  const ranked = matches
-    .map((candidate) => ({
+  const stripped = stripLabelPrefixes(text).toUpperCase()
+  const compact = stripCompactedLabelPrefixes(stripped.replace(/[^A-Z0-9]/g, ''))
+  const spacedCompact = compact.replace(/[^A-Z0-9]/g, ' ')
+  const correctedCompact = normalizeSerialCandidate(compact)
+  const candidates = unique([
+    ...(spacedCompact.match(/\b[A-Z0-9]{8,12}\b/g) ?? []).map((candidate) => ({
       candidate,
-      score: scoreMacSerialCandidate(candidate),
+      corrected: false,
+    })),
+    ...(correctedCompact.match(/[A-Z0-9]{8,12}/g) ?? []).map((candidate) => ({
+      candidate,
+      corrected: true,
+    })),
+  ])
+
+  const ranked = candidates
+    .map(({ candidate, corrected }) => ({
+      candidate,
+      score: scoreMacSerialCandidate(candidate) + (corrected ? 6 : 0),
     }))
     .sort((left, right) => right.score - left.score)
 
@@ -210,8 +255,10 @@ async function executeTesseractFallback(inputPath: string) {
 }
 
 function scoreVisionResult(profile: OcrProfile, variant: ImageVariant, result: VisionPayload): ScoredResult {
+  const lineWindows = buildLineWindows(result.lines)
   const searchSpace = unique([
     ...result.lines,
+    ...lineWindows,
     result.text,
     normalizeText(result.text),
     result.lines.join(' '),
