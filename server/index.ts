@@ -121,6 +121,10 @@ function touchSession(session: SessionRecord) {
   session.lastActivityAt = new Date().toISOString()
 }
 
+function normalizeText(text: string) {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
 function closeAndDeleteSession(id: string) {
   const session = sessions.get(id)
   if (!session) {
@@ -319,7 +323,15 @@ app.post('/api/session/:sessionId/confirm-pending', (req, res) => {
     return
   }
 
-  const payload = session.pendingScan
+  const pendingPayload = session.pendingScan
+  const overrideText = typeof req.body?.text === 'string' ? req.body.text : pendingPayload.text
+  const overrideRegexResult = typeof req.body?.regexResult === 'string' ? req.body.regexResult.trim() : ''
+  const normalizedBase = normalizeText(overrideText || pendingPayload.normalizedText)
+  const payload = {
+    ...pendingPayload,
+    text: overrideText,
+    normalizedText: normalizeText(`${overrideRegexResult} ${normalizedBase}`),
+  }
   session.pendingScan = null
   session.lastScan = payload
   const event = { type: 'scan', payload }

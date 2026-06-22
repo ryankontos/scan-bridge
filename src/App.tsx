@@ -113,6 +113,10 @@ function formatTime(value: string | null) {
   return new Date(value).toLocaleString()
 }
 
+function normalizeClientText(text: string) {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
 async function optimizeImageForUpload(file: Blob, quality: UploadQuality) {
   if (quality === 'full') {
     return file
@@ -860,6 +864,8 @@ function MobilePage({
   const [reviewBeforeSend, setReviewBeforeSend] = useState(false)
   const [regexError, setRegexError] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)
+  const [pendingDraftText, setPendingDraftText] = useState('')
+  const [pendingDraftRegexResult, setPendingDraftRegexResult] = useState('')
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -888,6 +894,17 @@ function MobilePage({
       window.clearTimeout(syncTimer)
     }
   }, [status])
+
+  useEffect(() => {
+    const syncTimer = window.setTimeout(() => {
+      setPendingDraftText(pendingScan?.text ?? '')
+      setPendingDraftRegexResult(pendingScan ? applyRegex(pendingScan.normalizedText, regex) ?? '' : '')
+    }, 0)
+
+    return () => {
+      window.clearTimeout(syncTimer)
+    }
+  }, [pendingScan, regex])
 
   useEffect(() => {
     return () => {
@@ -1032,6 +1049,13 @@ function MobilePage({
     try {
       const response = await fetch(`/api/session/${sessionId}/confirm-pending`, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: pendingDraftText,
+          regexResult: pendingDraftRegexResult,
+        }),
       })
 
       if (!response.ok) {
@@ -1066,6 +1090,8 @@ function MobilePage({
   }
 
   const pendingExtracted = pendingScan ? applyRegex(pendingScan.normalizedText, regex) : null
+  const previewRegexResult = pendingDraftRegexResult || pendingExtracted || ''
+  const previewNormalizedText = normalizeClientText(`${previewRegexResult} ${pendingDraftText}`)
 
   const scannerState = connectionStateFromSocket(socketState, hasConnectedOnce)
   const receiverState = connectionStateFromPeer(Boolean(status?.desktopConnected), hasPeerConnectedOnce)
@@ -1198,11 +1224,34 @@ function MobilePage({
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
-              <p className="font-mono text-lg text-zinc-950 dark:text-zinc-50">{pendingExtracted || 'No regex match'}</p>
-              {pendingScan?.text ? (
+              <div className="grid gap-2">
+                <Label htmlFor="pending-regex-result">Regex result</Label>
+                <Input
+                  id="pending-regex-result"
+                  value={pendingDraftRegexResult}
+                  onChange={(event) => setPendingDraftRegexResult(event.target.value)}
+                  placeholder="Edit the extracted value"
+                  disabled={!pendingScan}
+                />
+              </div>
+              {pendingScan ? (
                 <>
                   <Separator className="my-3" />
-                  <p className="whitespace-pre-wrap font-mono text-sm text-zinc-600 dark:text-zinc-400">{pendingScan.text}</p>
+                  <div className="grid gap-2">
+                    <Label htmlFor="pending-ocr-text">OCR text</Label>
+                    <textarea
+                      id="pending-ocr-text"
+                      value={pendingDraftText}
+                      onChange={(event) => setPendingDraftText(event.target.value)}
+                      className="min-h-32 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 font-mono text-sm text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-950/20 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-50 dark:focus-visible:ring-zinc-50/20"
+                    />
+                  </div>
+                  <p className="rounded-md border border-dashed border-zinc-200 px-3 py-2 font-mono text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+                    Final match preview: {previewRegexResult || 'No regex match'}
+                  </p>
+                  <p className="rounded-md border border-dashed border-zinc-200 px-3 py-2 font-mono text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+                    Final normalized text: {previewNormalizedText || 'No text'}
+                  </p>
                 </>
               ) : (
                 <p className="text-sm text-zinc-500 dark:text-zinc-400">No pending preview yet.</p>
