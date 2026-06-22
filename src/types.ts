@@ -8,6 +8,7 @@ export type SessionStatus = {
   mobileCount: number
   lastActivityAt: string | null
   ocrProfile: OcrProfile
+  latestScanId: string | null
 }
 
 export type ScanPayload = {

@@ -8,20 +8,10 @@ import { nanoid } from 'nanoid'
 import * as ws from 'ws'
 
 import { runOcr } from './ocr.js'
-import type { OcrProfile } from '../src/types.js'
+import type { OcrProfile, ScanPayload, SessionStatus } from '../src/types.js'
 
 const { WebSocketServer } = ws
 type WebSocket = ws.WebSocket
-
-type SessionStatus = {
-  sessionId: string
-  desktopConnected: boolean
-  mobileConnected: boolean
-  desktopCount: number
-  mobileCount: number
-  lastActivityAt: string | null
-  ocrProfile: OcrProfile
-}
 
 type SessionRecord = {
   id: string
@@ -30,9 +20,13 @@ type SessionRecord = {
   lastActivityAt: string | null
   createdAt: number
   ocrProfile: OcrProfile
+  lastScan: ScanPayload | null
 }
 
 type SocketRole = 'desktop' | 'mobile'
+type TrackedWebSocket = WebSocket & {
+  isAlive?: boolean
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const rootDir = join(__dirname, '..')
@@ -64,6 +58,7 @@ function createSession() {
     lastActivityAt: null,
     createdAt: Date.now(),
     ocrProfile: 'macSerial',
+    lastScan: null,
   }
   sessions.set(id, session)
   return session
@@ -78,6 +73,7 @@ function getSessionStatus(session: SessionRecord): SessionStatus {
     mobileCount: session.mobileClients.size,
     lastActivityAt: session.lastActivityAt,
     ocrProfile: session.ocrProfile,
+    latestScanId: session.lastScan?.id ?? null,
   }
 }
 
@@ -154,6 +150,22 @@ app.get('/api/session/:sessionId/status', (req, res) => {
   res.json(getSessionStatus(session))
 })
 
+app.get('/api/session/:sessionId/latest-scan', (req, res) => {
+  const session = sessions.get(String(req.params.sessionId))
+
+  if (!session) {
+    res.status(404).json({ error: 'Session not found' })
+    return
+  }
+
+  if (!session.lastScan) {
+    res.status(204).end()
+    return
+  }
+
+  res.json(session.lastScan)
+})
+
 app.delete('/api/session/:sessionId', (req, res) => {
   closeAndDeleteSession(String(req.params.sessionId))
   res.status(204).end()
@@ -202,6 +214,7 @@ app.post('/api/session/:sessionId/scan', upload.single('image'), async (req, res
       text: result.text,
       normalizedText: result.normalizedText,
     }
+    session.lastScan = payload
 
     const event = { type: 'scan', payload }
 
@@ -229,6 +242,9 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 wss.on('connection', (socket, request) => {
+  const trackedSocket = socket as TrackedWebSocket
+  trackedSocket.isAlive = true
+
   const url = new URL(request.url ?? '', `http://${request.headers.host}`)
   const sessionId = url.searchParams.get('sessionId')
   const role = url.searchParams.get('role') as SocketRole | null
@@ -248,6 +264,13 @@ wss.on('connection', (socket, request) => {
 
   const bucket = role === 'desktop' ? session.desktopClients : session.mobileClients
   bucket.add(socket)
+  socket.on('pong', () => {
+    trackedSocket.isAlive = true
+  })
+  send(socket, { type: 'status', payload: getSessionStatus(session) })
+  if (session.lastScan) {
+    send(socket, { type: 'scan', payload: session.lastScan })
+  }
   broadcastStatus(session)
 
   socket.on('close', () => {
@@ -255,6 +278,23 @@ wss.on('connection', (socket, request) => {
     broadcastStatus(session)
   })
 })
+
+setInterval(() => {
+  for (const client of wss.clients) {
+    const trackedClient = client as TrackedWebSocket
+
+    if (trackedClient.isAlive === false) {
+      client.terminate()
+      continue
+    }
+
+    trackedClient.isAlive = false
+    if (client.readyState === client.OPEN) {
+      send(client, { type: 'heartbeat', at: new Date().toISOString() })
+      client.ping()
+    }
+  }
+}, 15_000).unref()
 
 server.listen(port, () => {
   console.log(`Scan Bridge server listening on http://localhost:${port}`)

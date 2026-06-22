@@ -7,7 +7,7 @@ Scan text on an iPhone, OCR it on this Mac, and push the result to a paired desk
 - Desktop receiver UI
 - Phone scanner UI
 - Node server with WebSocket session pairing
-- Server-side OCR using `tesseract`
+- Server-side OCR using macOS Vision OCR with Tesseract fallback
 - LaunchAgent-based background service setup for this Mac
 - AppleScript clipboard observer for Chrome
 
@@ -16,6 +16,7 @@ Important files:
 - App source: [src/App.tsx](/Users/ryan/Documents/New project/scan-bridge/src/App.tsx)
 - Server: [server/index.ts](/Users/ryan/Documents/New project/scan-bridge/server/index.ts)
 - OCR pipeline: [server/ocr.ts](/Users/ryan/Documents/New project/scan-bridge/server/ocr.ts)
+- Native OCR helper: [server/vision-ocr.swift](/Users/ryan/Documents/New project/scan-bridge/server/vision-ocr.swift)
 - AppleScript: [applescripts/scan_bridge_clipboard_observer.applescript](/Users/ryan/Documents/New project/scan-bridge/applescripts/scan_bridge_clipboard_observer.applescript)
 - Service runner: [run-service.sh](/Users/ryan/Documents/New project/scan-bridge/run-service.sh)
 - Service deploy script: [scripts/deploy-service.sh](/Users/ryan/Documents/New project/scan-bridge/scripts/deploy-service.sh)
@@ -25,17 +26,19 @@ Important files:
 - Node 22+
 - npm
 - Homebrew
-- `tesseract`
+- Xcode command line tools
+- `tesseract` (fallback OCR only)
 - `cloudflared`
 - Google Chrome if using the AppleScript observer
 
-Install OCR:
+Install OCR dependencies:
 
 ```bash
+xcode-select --install
 brew install tesseract
 ```
 
-This project is tuned around the default Homebrew Tesseract package with `eng`, `osd`, and `snum`.
+Production deploys compile the Vision helper into `bin/scan-bridge-vision-ocr`. In local dev, the server can fall back to running the Swift source directly if the compiled helper is missing.
 
 ## Local Development
 
@@ -131,7 +134,8 @@ That script:
 1. builds the app
 2. syncs this repo into `~/Services/scan-bridge`
 3. runs `npm ci` in the service copy
-4. restarts the LaunchAgent
+4. compiles the native Vision OCR helper
+5. restarts the LaunchAgent
 
 If the service stops working after a deploy, check:
 

@@ -14,6 +14,8 @@ rsync -a --delete "$WORKSPACE_DIR/dist/" "$SERVICE_DIR/dist/"
 
 cd "$SERVICE_DIR"
 npm ci
+mkdir -p "$SERVICE_DIR/bin"
+xcrun swiftc -O "$SERVICE_DIR/server/vision-ocr.swift" -o "$SERVICE_DIR/bin/scan-bridge-vision-ocr"
 chmod +x "$SERVICE_DIR/run-service.sh"
 
 launchctl kickstart -k gui/501/com.ryankontos.scan-bridge

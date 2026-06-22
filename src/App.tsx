@@ -30,6 +30,7 @@ type ObserverPayload = {
 type ServerEvent =
   | { type: 'status'; payload: SessionStatus }
   | { type: 'scan'; payload: ScanPayload }
+  | { type: 'heartbeat'; at: string }
   | { type: 'error'; message: string }
 
 type SocketState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'offline'
@@ -183,8 +184,16 @@ function useSessionSocket(
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false)
   const [hasPeerConnectedOnce, setHasPeerConnectedOnce] = useState(false)
   const socketStateRef = useRef<SocketState>('idle')
+  const lastScanIdRef = useRef<string | null>(null)
+  const latestFetchRef = useRef<string | null>(null)
   const handleScan = useEffectEvent((scan: ScanPayload) => {
     onScan?.(scan)
+  })
+  const applyIncomingScan = useEffectEvent((scan: ScanPayload) => {
+    lastScanIdRef.current = scan.id
+    latestFetchRef.current = null
+    setLastScan((current) => (current?.id === scan.id ? current : scan))
+    handleScan(scan)
   })
 
   useEffect(() => {
@@ -199,6 +208,8 @@ function useSessionSocket(
       setSocketState(sessionId ? 'connecting' : 'idle')
       setHasConnectedOnce(false)
       setHasPeerConnectedOnce(false)
+      lastScanIdRef.current = null
+      latestFetchRef.current = null
     }, 0)
 
     if (!sessionId) {
@@ -212,6 +223,33 @@ function useSessionSocket(
     let retryTimer: number | null = null
     let pollTimer: number | null = null
     let reconnectAttempt = 0
+
+    const fetchLatestScan = async (expectedScanId?: string | null) => {
+      if (latestFetchRef.current && latestFetchRef.current === expectedScanId) {
+        return
+      }
+
+      latestFetchRef.current = expectedScanId ?? '__latest__'
+
+      try {
+        const response = await fetch(`/api/session/${sessionId}/latest-scan`, { cache: 'no-store' })
+        if (response.status === 204 || !response.ok) {
+          if (latestFetchRef.current === (expectedScanId ?? '__latest__')) {
+            latestFetchRef.current = null
+          }
+          return
+        }
+
+        const payload = (await response.json()) as ScanPayload
+        if (!cancelled) {
+          applyIncomingScan(payload)
+        }
+      } catch {
+        if (latestFetchRef.current === (expectedScanId ?? '__latest__')) {
+          latestFetchRef.current = null
+        }
+      }
+    }
 
     const fetchStatus = async () => {
       try {
@@ -230,6 +268,10 @@ function useSessionSocket(
           const peerConnected = role === 'desktop' ? payload.mobileConnected : payload.desktopConnected
           if (peerConnected) {
             setHasPeerConnectedOnce(true)
+          }
+
+          if (payload.latestScanId && payload.latestScanId !== lastScanIdRef.current) {
+            void fetchLatestScan(payload.latestScanId)
           }
         }
       } catch {
@@ -278,11 +320,18 @@ function useSessionSocket(
           if (peerConnected) {
             setHasPeerConnectedOnce(true)
           }
+
+          if (data.payload.latestScanId && data.payload.latestScanId !== lastScanIdRef.current) {
+            void fetchLatestScan(data.payload.latestScanId)
+          }
         }
 
         if (data.type === 'scan') {
-          setLastScan(data.payload)
-          handleScan(data.payload)
+          applyIncomingScan(data.payload)
+        }
+
+        if (data.type === 'heartbeat') {
+          setSocketError(null)
         }
 
         if (data.type === 'error') {
@@ -312,7 +361,7 @@ function useSessionSocket(
     void fetchStatus()
     pollTimer = window.setInterval(() => {
       void fetchStatus()
-    }, 2500)
+    }, 1200)
     connect()
 
     return () => {
