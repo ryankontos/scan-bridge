@@ -8,7 +8,7 @@ import { nanoid } from 'nanoid'
 import * as ws from 'ws'
 
 import { runOcr } from './ocr.js'
-import type { OcrProfile, ScanPayload, SessionStatus } from '../src/types.js'
+import type { OcrProfile, RegexPresetId, ScanPayload, SessionStatus } from '../src/types.js'
 
 const { WebSocketServer } = ws
 type WebSocket = ws.WebSocket
@@ -21,6 +21,10 @@ type SessionRecord = {
   createdAt: number
   ocrProfile: OcrProfile
   lastScan: ScanPayload | null
+  pendingScan: ScanPayload | null
+  regex: string
+  regexPresetId: RegexPresetId
+  reviewBeforeSend: boolean
 }
 
 type SocketRole = 'desktop' | 'mobile'
@@ -48,6 +52,18 @@ const upload = multer({
 const sessions = new Map<string, SessionRecord>()
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000
 const port = Number(process.env.PORT ?? 8787)
+const DEFAULT_REGEX = '\\b[A-Z0-9]{8,12}\\b'
+
+function getOcrProfileForPreset(presetId: RegexPresetId): OcrProfile {
+  switch (presetId) {
+    case 'macSerial':
+      return 'macSerial'
+    case 'appleModel':
+      return 'appleModel'
+    default:
+      return 'generic'
+  }
+}
 
 function createSession() {
   const id = nanoid(12)
@@ -59,6 +75,10 @@ function createSession() {
     createdAt: Date.now(),
     ocrProfile: 'macSerial',
     lastScan: null,
+    pendingScan: null,
+    regex: DEFAULT_REGEX,
+    regexPresetId: 'macSerial',
+    reviewBeforeSend: false,
   }
   sessions.set(id, session)
   return session
@@ -74,6 +94,10 @@ function getSessionStatus(session: SessionRecord): SessionStatus {
     lastActivityAt: session.lastActivityAt,
     ocrProfile: session.ocrProfile,
     latestScanId: session.lastScan?.id ?? null,
+    latestPendingScanId: session.pendingScan?.id ?? null,
+    regex: session.regex,
+    regexPresetId: session.regexPresetId,
+    reviewBeforeSend: session.reviewBeforeSend,
   }
 }
 
@@ -166,6 +190,22 @@ app.get('/api/session/:sessionId/latest-scan', (req, res) => {
   res.json(session.lastScan)
 })
 
+app.get('/api/session/:sessionId/pending-scan', (req, res) => {
+  const session = sessions.get(String(req.params.sessionId))
+
+  if (!session) {
+    res.status(404).json({ error: 'Session not found' })
+    return
+  }
+
+  if (!session.pendingScan) {
+    res.status(204).end()
+    return
+  }
+
+  res.json(session.pendingScan)
+})
+
 app.delete('/api/session/:sessionId', (req, res) => {
   closeAndDeleteSession(String(req.params.sessionId))
   res.status(204).end()
@@ -179,13 +219,34 @@ app.put('/api/session/:sessionId/config', (req, res) => {
     return
   }
 
-  const nextProfile = req.body?.ocrProfile as OcrProfile | undefined
-  if (!nextProfile || !['generic', 'macSerial', 'appleModel'].includes(nextProfile)) {
-    res.status(400).json({ error: 'Invalid OCR profile' })
+  const nextRegex = typeof req.body?.regex === 'string' ? req.body.regex : undefined
+  if (typeof nextRegex === 'string') {
+    try {
+      if (nextRegex.trim()) {
+        new RegExp(nextRegex)
+      }
+    } catch {
+      res.status(400).json({ error: 'Invalid regex' })
+      return
+    }
+    session.regex = nextRegex
+  }
+
+  const nextPresetId = req.body?.regexPresetId as RegexPresetId | undefined
+  if (nextPresetId && !['macSerial', 'appleModel', 'custom'].includes(nextPresetId)) {
+    res.status(400).json({ error: 'Invalid regex preset' })
     return
   }
 
-  session.ocrProfile = nextProfile
+  if (nextPresetId) {
+    session.regexPresetId = nextPresetId
+    session.ocrProfile = getOcrProfileForPreset(nextPresetId)
+  }
+
+  if (typeof req.body?.reviewBeforeSend === 'boolean') {
+    session.reviewBeforeSend = req.body.reviewBeforeSend
+  }
+
   broadcastStatus(session)
   res.json(getSessionStatus(session))
 })
@@ -214,24 +275,78 @@ app.post('/api/session/:sessionId/scan', upload.single('image'), async (req, res
       text: result.text,
       normalizedText: result.normalizedText,
     }
-    session.lastScan = payload
+    if (session.reviewBeforeSend) {
+      session.pendingScan = payload
+      const previewEvent = { type: 'preview', payload }
+      for (const socket of session.mobileClients) {
+        send(socket, previewEvent)
+      }
+    } else {
+      session.pendingScan = null
+      session.lastScan = payload
+      const event = { type: 'scan', payload }
 
-    const event = { type: 'scan', payload }
+      for (const socket of session.desktopClients) {
+        send(socket, event)
+      }
 
-    for (const socket of session.desktopClients) {
-      send(socket, event)
-    }
-
-    for (const socket of session.mobileClients) {
-      send(socket, event)
+      for (const socket of session.mobileClients) {
+        send(socket, event)
+      }
     }
 
     broadcastStatus(session)
-    res.json(payload)
+    res.json({
+      mode: session.reviewBeforeSend ? 'preview' : 'sent',
+      payload,
+    })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'OCR failed'
     res.status(500).json({ error: message })
   }
+})
+
+app.post('/api/session/:sessionId/confirm-pending', (req, res) => {
+  const session = sessions.get(String(req.params.sessionId))
+
+  if (!session) {
+    res.status(404).json({ error: 'Session not found' })
+    return
+  }
+
+  if (!session.pendingScan) {
+    res.status(404).json({ error: 'No pending scan' })
+    return
+  }
+
+  const payload = session.pendingScan
+  session.pendingScan = null
+  session.lastScan = payload
+  const event = { type: 'scan', payload }
+
+  for (const socket of session.desktopClients) {
+    send(socket, event)
+  }
+
+  for (const socket of session.mobileClients) {
+    send(socket, event)
+  }
+
+  broadcastStatus(session)
+  res.json(payload)
+})
+
+app.delete('/api/session/:sessionId/pending-scan', (req, res) => {
+  const session = sessions.get(String(req.params.sessionId))
+
+  if (!session) {
+    res.status(404).json({ error: 'Session not found' })
+    return
+  }
+
+  session.pendingScan = null
+  broadcastStatus(session)
+  res.status(204).end()
 })
 
 if (process.env.NODE_ENV === 'production') {
@@ -270,6 +385,9 @@ wss.on('connection', (socket, request) => {
   send(socket, { type: 'status', payload: getSessionStatus(session) })
   if (session.lastScan) {
     send(socket, { type: 'scan', payload: session.lastScan })
+  }
+  if (role === 'mobile' && session.pendingScan) {
+    send(socket, { type: 'preview', payload: session.pendingScan })
   }
   broadcastStatus(session)
 

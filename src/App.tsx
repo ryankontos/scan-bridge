@@ -8,13 +8,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './com
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Separator } from './components/ui/separator'
-import type { OcrProfile, ScanPayload, SessionStatus } from './types'
+import type { OcrProfile, RegexPresetId, ScanPayload, SessionConfig, SessionStatus } from './types'
 
 type ScanRecord = ScanPayload & {
   extracted: string | null
 }
-
-type RegexPresetId = 'macSerial' | 'appleModel' | 'custom'
 
 type ObserverPayload = {
   sessionId: string | null
@@ -30,6 +28,7 @@ type ObserverPayload = {
 type ServerEvent =
   | { type: 'status'; payload: SessionStatus }
   | { type: 'scan'; payload: ScanPayload }
+  | { type: 'preview'; payload: ScanPayload }
   | { type: 'heartbeat'; at: string }
   | { type: 'error'; message: string }
 
@@ -42,6 +41,7 @@ const HISTORY_KEY = 'scan-bridge-history'
 const SESSION_KEY = 'scan-bridge-session'
 const REGEX_KEY = 'scan-bridge-regex'
 const REGEX_PRESET_KEY = 'scan-bridge-regex-preset'
+const REVIEW_MODE_KEY = 'scan-bridge-review-before-send'
 const OBSERVER_KEY = 'scan-bridge-observer'
 const THEME_KEY = 'scan-bridge-theme'
 const REGEX_PRESETS: Array<{ id: RegexPresetId; label: string; pattern: string }> = [
@@ -84,6 +84,25 @@ function applyRegex(text: string, pattern: string): string | null {
   } catch {
     return null
   }
+}
+
+function buildSessionConfig(regex: string, regexPresetId: RegexPresetId, reviewBeforeSend: boolean): SessionConfig {
+  return { regex, regexPresetId, reviewBeforeSend }
+}
+
+async function pushSessionConfig(sessionId: string, config: SessionConfig) {
+  await fetch(`/api/session/${sessionId}/config`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      regex: config.regex,
+      regexPresetId: config.regexPresetId,
+      reviewBeforeSend: config.reviewBeforeSend,
+      ocrProfile: getOcrProfileForPreset(config.regexPresetId),
+    }),
+  })
 }
 
 function formatTime(value: string | null) {
@@ -179,21 +198,32 @@ function useSessionSocket(
 ) {
   const [status, setStatus] = useState<SessionStatus | null>(null)
   const [lastScan, setLastScan] = useState<ScanPayload | null>(null)
+  const [pendingScan, setPendingScan] = useState<ScanPayload | null>(null)
   const [socketError, setSocketError] = useState<string | null>(null)
   const [socketState, setSocketState] = useState<SocketState>('idle')
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false)
   const [hasPeerConnectedOnce, setHasPeerConnectedOnce] = useState(false)
   const socketStateRef = useRef<SocketState>('idle')
   const lastScanIdRef = useRef<string | null>(null)
+  const pendingScanIdRef = useRef<string | null>(null)
   const latestFetchRef = useRef<string | null>(null)
+  const pendingFetchRef = useRef<string | null>(null)
   const handleScan = useEffectEvent((scan: ScanPayload) => {
     onScan?.(scan)
   })
   const applyIncomingScan = useEffectEvent((scan: ScanPayload) => {
     lastScanIdRef.current = scan.id
     latestFetchRef.current = null
+    pendingScanIdRef.current = null
+    pendingFetchRef.current = null
+    setPendingScan(null)
     setLastScan((current) => (current?.id === scan.id ? current : scan))
     handleScan(scan)
+  })
+  const applyIncomingPreview = useEffectEvent((scan: ScanPayload) => {
+    pendingScanIdRef.current = scan.id
+    pendingFetchRef.current = null
+    setPendingScan((current) => (current?.id === scan.id ? current : scan))
   })
 
   useEffect(() => {
@@ -204,12 +234,15 @@ function useSessionSocket(
     const resetTimer = window.setTimeout(() => {
       setStatus(null)
       setLastScan(null)
+      setPendingScan(null)
       setSocketError(null)
       setSocketState(sessionId ? 'connecting' : 'idle')
       setHasConnectedOnce(false)
       setHasPeerConnectedOnce(false)
       lastScanIdRef.current = null
       latestFetchRef.current = null
+      pendingScanIdRef.current = null
+      pendingFetchRef.current = null
     }, 0)
 
     if (!sessionId) {
@@ -251,6 +284,42 @@ function useSessionSocket(
       }
     }
 
+    const fetchPendingScan = async (expectedPendingId?: string | null) => {
+      if (pendingFetchRef.current && pendingFetchRef.current === expectedPendingId) {
+        return
+      }
+
+      pendingFetchRef.current = expectedPendingId ?? '__pending__'
+
+      try {
+        const response = await fetch(`/api/session/${sessionId}/pending-scan`, { cache: 'no-store' })
+        if (response.status === 204) {
+          pendingScanIdRef.current = null
+          setPendingScan(null)
+          if (pendingFetchRef.current === (expectedPendingId ?? '__pending__')) {
+            pendingFetchRef.current = null
+          }
+          return
+        }
+
+        if (!response.ok) {
+          if (pendingFetchRef.current === (expectedPendingId ?? '__pending__')) {
+            pendingFetchRef.current = null
+          }
+          return
+        }
+
+        const payload = (await response.json()) as ScanPayload
+        if (!cancelled) {
+          applyIncomingPreview(payload)
+        }
+      } catch {
+        if (pendingFetchRef.current === (expectedPendingId ?? '__pending__')) {
+          pendingFetchRef.current = null
+        }
+      }
+    }
+
     const fetchStatus = async () => {
       try {
         const response = await fetch(`/api/session/${sessionId}/status`, { cache: 'no-store' })
@@ -272,6 +341,14 @@ function useSessionSocket(
 
           if (payload.latestScanId && payload.latestScanId !== lastScanIdRef.current) {
             void fetchLatestScan(payload.latestScanId)
+          }
+          if (payload.latestPendingScanId && payload.latestPendingScanId !== pendingScanIdRef.current) {
+            void fetchPendingScan(payload.latestPendingScanId)
+          }
+          if (!payload.latestPendingScanId) {
+            pendingScanIdRef.current = null
+            pendingFetchRef.current = null
+            setPendingScan(null)
           }
         }
       } catch {
@@ -324,10 +401,22 @@ function useSessionSocket(
           if (data.payload.latestScanId && data.payload.latestScanId !== lastScanIdRef.current) {
             void fetchLatestScan(data.payload.latestScanId)
           }
+          if (data.payload.latestPendingScanId && data.payload.latestPendingScanId !== pendingScanIdRef.current) {
+            void fetchPendingScan(data.payload.latestPendingScanId)
+          }
+          if (!data.payload.latestPendingScanId) {
+            pendingScanIdRef.current = null
+            pendingFetchRef.current = null
+            setPendingScan(null)
+          }
         }
 
         if (data.type === 'scan') {
           applyIncomingScan(data.payload)
+        }
+
+        if (data.type === 'preview') {
+          applyIncomingPreview(data.payload)
         }
 
         if (data.type === 'heartbeat') {
@@ -377,7 +466,7 @@ function useSessionSocket(
     }
   }, [role, sessionId])
 
-  return { status, lastScan, socketError, socketState, hasConnectedOnce, hasPeerConnectedOnce }
+  return { status, lastScan, pendingScan, socketError, socketState, hasConnectedOnce, hasPeerConnectedOnce }
 }
 
 function DesktopPage({
@@ -402,6 +491,7 @@ function DesktopPage({
     return detectPresetId(localStorage.getItem(REGEX_KEY) ?? '\\b[A-Z0-9]{8,12}\\b')
   })
   const [regexError, setRegexError] = useState<string | null>(null)
+  const [reviewBeforeSend, setReviewBeforeSend] = useState(() => localStorage.getItem(REVIEW_MODE_KEY) === 'true')
   const [qrCode, setQrCode] = useState('')
   const [loadingSession, setLoadingSession] = useState(false)
   const regexRef = useRef(regex)
@@ -418,7 +508,21 @@ function DesktopPage({
     })
   }
 
-  const { status, socketError, socketState, hasPeerConnectedOnce } = useSessionSocket(sessionId, 'desktop', appendScan)
+  function rebuildHistoryForRegex(nextRegex: string) {
+    setHistory((current) =>
+      current.map((scan) => ({
+        ...scan,
+        extracted: applyRegex(scan.normalizedText, nextRegex),
+      })),
+    )
+  }
+
+  const { status, pendingScan, socketError, socketState, hasPeerConnectedOnce } = useSessionSocket(sessionId, 'desktop', appendScan)
+
+  async function syncConfig(nextConfig: SessionConfig, targetSessionId = sessionId) {
+    if (!targetSessionId) return
+    await pushSessionConfig(targetSessionId, nextConfig)
+  }
 
   async function ensureSession(reset = false) {
     setLoadingSession(true)
@@ -431,6 +535,7 @@ function DesktopPage({
       const response = await fetch('/api/session', { method: 'POST' })
       const payload = (await response.json()) as { sessionId: string }
       setSessionId(payload.sessionId)
+      await syncConfig(buildSessionConfig(regexRef.current, regexPresetId, reviewBeforeSend), payload.sessionId)
     } finally {
       setLoadingSession(false)
     }
@@ -471,11 +576,38 @@ function DesktopPage({
   useEffect(() => {
     localStorage.setItem(REGEX_KEY, regex)
     localStorage.setItem(REGEX_PRESET_KEY, regexPresetId)
-  }, [regex, regexPresetId])
+    localStorage.setItem(REVIEW_MODE_KEY, String(reviewBeforeSend))
+  }, [regex, regexPresetId, reviewBeforeSend])
 
   useEffect(() => {
     regexRef.current = regex
   }, [regex])
+
+  useEffect(() => {
+    if (!status) {
+      return
+    }
+
+    const syncTimer = window.setTimeout(() => {
+      setRegex((current) => (current === status.regex ? current : status.regex))
+      setRegexPresetId((current) => (current === status.regexPresetId ? current : status.regexPresetId))
+      setReviewBeforeSend((current) => (current === status.reviewBeforeSend ? current : status.reviewBeforeSend))
+      rebuildHistoryForRegex(status.regex)
+
+      try {
+        if (status.regex.trim()) {
+          new RegExp(status.regex)
+        }
+        setRegexError(null)
+      } catch {
+        setRegexError('Invalid regex')
+      }
+    }, 0)
+
+    return () => {
+      window.clearTimeout(syncTimer)
+    }
+  }, [status])
 
   useEffect(() => {
     const payload: ObserverPayload = {
@@ -515,25 +647,10 @@ function DesktopPage({
     })
   }, [sessionId])
 
-  useEffect(() => {
-    if (!sessionId) {
-      return
-    }
-
-    void fetch(`/api/session/${sessionId}/config`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        ocrProfile: getOcrProfileForPreset(regexPresetId),
-      }),
-    })
-  }, [regexPresetId, sessionId])
-
   function handleRegexChange(value: string) {
     setRegex(value)
-    setRegexPresetId(detectPresetId(value))
+    const nextPresetId = detectPresetId(value)
+    setRegexPresetId(nextPresetId)
 
     try {
       if (value.trim()) {
@@ -543,13 +660,8 @@ function DesktopPage({
     } catch {
       setRegexError('Invalid regex')
     }
-
-    setHistory((current) =>
-      current.map((scan) => ({
-        ...scan,
-        extracted: applyRegex(scan.normalizedText, value),
-      })),
-    )
+    rebuildHistoryForRegex(value)
+    void syncConfig(buildSessionConfig(value, nextPresetId, reviewBeforeSend))
   }
 
   function handlePresetChange(nextPresetId: RegexPresetId) {
@@ -557,8 +669,20 @@ function DesktopPage({
 
     const preset = REGEX_PRESETS.find((item) => item.id === nextPresetId)
     if (preset && preset.pattern) {
-      handleRegexChange(preset.pattern)
+      setRegex(preset.pattern)
+      setRegexError(null)
+      rebuildHistoryForRegex(preset.pattern)
+      void syncConfig(buildSessionConfig(preset.pattern, nextPresetId, reviewBeforeSend))
+      return
     }
+
+    void syncConfig(buildSessionConfig(regex, nextPresetId, reviewBeforeSend))
+  }
+
+  function handleReviewModeToggle() {
+    const nextValue = !reviewBeforeSend
+    setReviewBeforeSend(nextValue)
+    void syncConfig(buildSessionConfig(regex, regexPresetId, nextValue))
   }
 
   const captureUrl = sessionId ? `${window.location.origin}/capture/${sessionId}` : ''
@@ -631,12 +755,16 @@ function DesktopPage({
                   placeholder="\\b[A-Z0-9]{8,12}\\b"
                 />
                 {regexError ? <p className="text-sm text-red-600">{regexError}</p> : null}
+                <Button variant="outline" onClick={handleReviewModeToggle}>
+                  {reviewBeforeSend ? 'Review on phone: on' : 'Review on phone: off'}
+                </Button>
               </div>
 
               <div className="text-xs text-zinc-500 dark:text-zinc-400">
                 Last activity: {formatTime(status?.lastActivityAt ?? null)}
               </div>
               {socketState !== 'connected' && socketError ? <p className="text-xs text-red-600">{socketError}</p> : null}
+              {pendingScan ? <p className="text-xs text-zinc-500 dark:text-zinc-400">Phone review pending</p> : null}
             </CardContent>
           </Card>
 
@@ -722,14 +850,44 @@ function MobilePage({
   onToggleTheme: () => void
 }) {
   const { sessionId = '' } = useParams()
-  const { status, lastScan, socketError, socketState, hasConnectedOnce, hasPeerConnectedOnce } = useSessionSocket(sessionId, 'mobile')
+  const { status, lastScan, pendingScan, socketError, socketState, hasConnectedOnce, hasPeerConnectedOnce } = useSessionSocket(sessionId, 'mobile')
   const [cameraReady, setCameraReady] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [uploadQuality, setUploadQuality] = useState<UploadQuality>('fast')
+  const [regex, setRegex] = useState('\\b[A-Z0-9]{8,12}\\b')
+  const [regexPresetId, setRegexPresetId] = useState<RegexPresetId>('macSerial')
+  const [reviewBeforeSend, setReviewBeforeSend] = useState(false)
+  const [regexError, setRegexError] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+
+  useEffect(() => {
+    if (!status) {
+      return
+    }
+
+    const syncTimer = window.setTimeout(() => {
+      setRegex(status.regex)
+      setRegexPresetId(status.regexPresetId)
+      setReviewBeforeSend(status.reviewBeforeSend)
+
+      try {
+        if (status.regex.trim()) {
+          new RegExp(status.regex)
+        }
+        setRegexError(null)
+      } catch {
+        setRegexError('Invalid regex')
+      }
+    }, 0)
+
+    return () => {
+      window.clearTimeout(syncTimer)
+    }
+  }, [status])
 
   useEffect(() => {
     return () => {
@@ -826,6 +984,89 @@ function MobilePage({
     await sendBlob(file)
   }
 
+  async function syncConfig(nextConfig: SessionConfig) {
+    if (!sessionId) return
+    await pushSessionConfig(sessionId, nextConfig)
+  }
+
+  function handleRegexChange(value: string) {
+    setRegex(value)
+    const nextPresetId = detectPresetId(value)
+    setRegexPresetId(nextPresetId)
+
+    try {
+      if (value.trim()) {
+        new RegExp(value)
+      }
+      setRegexError(null)
+    } catch {
+      setRegexError('Invalid regex')
+    }
+
+    void syncConfig(buildSessionConfig(value, nextPresetId, reviewBeforeSend))
+  }
+
+  function handlePresetChange(nextPresetId: RegexPresetId) {
+    setRegexPresetId(nextPresetId)
+    const preset = REGEX_PRESETS.find((item) => item.id === nextPresetId)
+    if (preset && preset.pattern) {
+      setRegex(preset.pattern)
+      setRegexError(null)
+      void syncConfig(buildSessionConfig(preset.pattern, nextPresetId, reviewBeforeSend))
+      return
+    }
+
+    void syncConfig(buildSessionConfig(regex, nextPresetId, reviewBeforeSend))
+  }
+
+  function handleReviewModeToggle() {
+    const nextValue = !reviewBeforeSend
+    setReviewBeforeSend(nextValue)
+    void syncConfig(buildSessionConfig(regex, regexPresetId, nextValue))
+  }
+
+  async function confirmPendingScan() {
+    setConfirming(true)
+    setError(null)
+
+    try {
+      const response = await fetch(`/api/session/${sessionId}/confirm-pending`, {
+        method: 'POST',
+      })
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? 'Confirm failed')
+      }
+    } catch (confirmError) {
+      setError(confirmError instanceof Error ? confirmError.message : 'Confirm failed')
+    } finally {
+      setConfirming(false)
+    }
+  }
+
+  async function discardPendingScan() {
+    setConfirming(true)
+    setError(null)
+
+    try {
+      const response = await fetch(`/api/session/${sessionId}/pending-scan`, {
+        method: 'DELETE',
+      })
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? 'Discard failed')
+      }
+    } catch (discardError) {
+      setError(discardError instanceof Error ? discardError.message : 'Discard failed')
+    } finally {
+      setConfirming(false)
+    }
+  }
+
+  const pendingExtracted = pendingScan ? applyRegex(pendingScan.normalizedText, regex) : null
+
   const scannerState = connectionStateFromSocket(socketState, hasConnectedOnce)
   const receiverState = connectionStateFromPeer(Boolean(status?.desktopConnected), hasPeerConnectedOnce)
   const connectionState =
@@ -860,8 +1101,37 @@ function MobilePage({
 
       <Card>
         <CardHeader>
+          <CardTitle>Rules</CardTitle>
+          <CardDescription>These stay synced with the desktop.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-2">
+            <Label htmlFor="mobile-regex-preset">Regex preset</Label>
+            <select
+              id="mobile-regex-preset"
+              value={regexPresetId}
+              onChange={(event) => handlePresetChange(event.target.value as RegexPresetId)}
+              className="flex h-10 w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-950/20 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-50 dark:focus-visible:ring-zinc-50/20"
+            >
+              {REGEX_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.label}
+                </option>
+              ))}
+            </select>
+            <Input value={regex} onChange={(event) => handleRegexChange(event.target.value)} placeholder="\\b[A-Z0-9]{8,12}\\b" />
+            {regexError ? <p className="text-sm text-red-600">{regexError}</p> : null}
+            <Button variant="outline" onClick={handleReviewModeToggle}>
+              {reviewBeforeSend ? 'Review before send: on' : 'Review before send: off'}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Capture</CardTitle>
-          <CardDescription>Use live camera capture or upload a photo.</CardDescription>
+          <CardDescription>{reviewBeforeSend ? 'Capture, review the OCR, then confirm.' : 'Use live camera capture or upload a photo.'}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="overflow-hidden rounded-xl border border-zinc-200 bg-zinc-950 dark:border-zinc-800">
@@ -896,7 +1166,7 @@ function MobilePage({
             </Button>
             <Button onClick={() => void captureFrame()} disabled={!cameraReady || uploading}>
               <ScanLine className="mr-2 h-4 w-4" />
-              {uploading ? 'Sending...' : 'Capture and send'}
+              {uploading ? 'Sending...' : reviewBeforeSend ? 'Capture for review' : 'Capture and send'}
             </Button>
           </div>
 
@@ -919,6 +1189,36 @@ function MobilePage({
           {error ? <p className="text-sm text-red-600">{error}</p> : null}
         </CardContent>
       </Card>
+
+      {reviewBeforeSend ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Preview</CardTitle>
+            <CardDescription>Confirm this OCR result before it is sent to the desktop.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
+              <p className="font-mono text-lg text-zinc-950 dark:text-zinc-50">{pendingExtracted || 'No regex match'}</p>
+              {pendingScan?.text ? (
+                <>
+                  <Separator className="my-3" />
+                  <p className="whitespace-pre-wrap font-mono text-sm text-zinc-600 dark:text-zinc-400">{pendingScan.text}</p>
+                </>
+              ) : (
+                <p className="text-sm text-zinc-500 dark:text-zinc-400">No pending preview yet.</p>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Button onClick={() => void confirmPendingScan()} disabled={!pendingScan || confirming}>
+                {confirming ? 'Working...' : 'Confirm send'}
+              </Button>
+              <Button variant="outline" onClick={() => void discardPendingScan()} disabled={!pendingScan || confirming}>
+                Discard
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>

@@ -1,6 +1,13 @@
 export type OcrProfile = 'generic' | 'macSerial' | 'appleModel'
+export type RegexPresetId = 'macSerial' | 'appleModel' | 'custom'
 
-export type SessionStatus = {
+export type SessionConfig = {
+  regex: string
+  regexPresetId: RegexPresetId
+  reviewBeforeSend: boolean
+}
+
+export type SessionStatus = SessionConfig & {
   sessionId: string
   desktopConnected: boolean
   mobileConnected: boolean
@@ -9,6 +16,7 @@ export type SessionStatus = {
   lastActivityAt: string | null
   ocrProfile: OcrProfile
   latestScanId: string | null
+  latestPendingScanId: string | null
 }
 
 export type ScanPayload = {
