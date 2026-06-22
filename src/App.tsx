@@ -1216,7 +1216,7 @@ function MobilePage({
         </CardContent>
       </Card>
 
-      {reviewBeforeSend ? (
+      {reviewBeforeSend && pendingScan ? (
         <div className="fixed inset-0 z-50 flex items-end bg-black/45 p-3 sm:items-center sm:justify-center sm:p-6">
           <div className="w-full max-w-xl rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
             <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-4 py-4 dark:border-zinc-800">
