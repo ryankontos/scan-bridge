@@ -48,7 +48,7 @@ const THEME_KEY = 'scan-bridge-theme'
 const REGEX_PRESETS: Array<{ id: RegexPresetId; label: string; pattern: string }> = [
   { id: 'macSerial', label: 'Mac serial number', pattern: '\\b[A-Z0-9]{8,12}\\b' },
   { id: 'appleModel', label: 'Apple A-number', pattern: '\\bA\\d{4}\\b' },
-  { id: 'custom', label: 'Custom regex', pattern: '' },
+  { id: 'custom', label: 'Custom pattern', pattern: '' },
 ]
 
 declare global {
@@ -741,7 +741,7 @@ function DesktopPage({
               </div>
 
               <div className="grid gap-2">
-                <Label htmlFor="regex-preset">Regex preset</Label>
+                <Label htmlFor="regex-preset">Detection mode</Label>
                 <select
                   id="regex-preset"
                   value={regexPresetId}
@@ -758,7 +758,7 @@ function DesktopPage({
                   id="regex"
                   value={regex}
                   onChange={(event) => handleRegexChange(event.target.value)}
-                  placeholder="\\b[A-Z0-9]{8,12}\\b"
+                  placeholder={regexPresetId === 'custom' ? '\\b[A-Z0-9]{8,12}\\b' : 'Preset controls matching'}
                 />
                 {regexError ? <p className="text-sm text-red-600">{regexError}</p> : null}
                 <Button variant="outline" onClick={handleReviewModeToggle}>
@@ -776,15 +776,13 @@ function DesktopPage({
 
           <Card>
             <CardHeader>
-              <CardTitle>Current scan</CardTitle>
-              <CardDescription>Latest regex hit and the raw OCR text behind it.</CardDescription>
+              <CardTitle>Current result</CardTitle>
+              <CardDescription>Latest detected value and the raw OCR text behind it.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
-                <p id="latest-extracted-value" className="font-mono text-xl text-zinc-950 dark:text-zinc-50">
-                  {latestScan?.extracted || 'Waiting for a regex match'}
-                </p>
-              </div>
+              <p id="latest-extracted-value" className="font-mono text-sm text-zinc-950 dark:text-zinc-50">
+                {latestScan?.extracted || 'No detected value yet'}
+              </p>
               <p id="latest-raw-value" className="whitespace-pre-wrap font-mono text-sm text-zinc-600 dark:text-zinc-400">
                 {latestScan?.text || 'No OCR text yet'}
               </p>
@@ -829,7 +827,7 @@ function DesktopPage({
                   <div className="flex flex-col gap-3">
                     <div className="flex flex-wrap items-center gap-2">
                       <Badge variant={scan.extracted ? 'success' : 'default'}>
-                        {scan.extracted ? 'Regex match' : 'Raw OCR'}
+                        {scan.extracted ? 'Detected value' : 'Raw OCR'}
                       </Badge>
                       <span className="text-xs text-zinc-500 dark:text-zinc-400">{new Date(scan.receivedAt).toLocaleString()}</span>
                     </div>
@@ -949,9 +947,17 @@ function MobilePage({
       const formData = new FormData()
       formData.append('image', uploadBlob, `capture-${Date.now()}.jpg`)
 
+      const abortController = new AbortController()
+      const timeoutId = window.setTimeout(() => {
+        abortController.abort()
+      }, 30000)
+
       const response = await fetch(`/api/session/${sessionId}/scan`, {
         method: 'POST',
         body: formData,
+        signal: abortController.signal,
+      }).finally(() => {
+        window.clearTimeout(timeoutId)
       })
 
       if (!response.ok) {
@@ -959,7 +965,11 @@ function MobilePage({
         throw new Error(payload.error ?? 'Upload failed')
       }
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : 'Upload failed')
+      if (uploadError instanceof Error && uploadError.name === 'AbortError') {
+        setError('Scan timed out. Try again.')
+      } else {
+        setError(uploadError instanceof Error ? uploadError.message : 'Upload failed')
+      }
     } finally {
       setUploading(false)
     }
@@ -1135,7 +1145,7 @@ function MobilePage({
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-2">
-            <Label htmlFor="mobile-regex-preset">Regex preset</Label>
+            <Label htmlFor="mobile-regex-preset">Detection mode</Label>
             <select
               id="mobile-regex-preset"
               value={regexPresetId}
@@ -1148,7 +1158,7 @@ function MobilePage({
                 </option>
               ))}
             </select>
-            <Input value={regex} onChange={(event) => handleRegexChange(event.target.value)} placeholder="\\b[A-Z0-9]{8,12}\\b" />
+            <Input value={regex} onChange={(event) => handleRegexChange(event.target.value)} placeholder={regexPresetId === 'custom' ? '\\b[A-Z0-9]{8,12}\\b' : 'Preset controls matching'} />
             {regexError ? <p className="text-sm text-red-600">{regexError}</p> : null}
             <Button variant="outline" onClick={handleReviewModeToggle}>
               {reviewBeforeSend ? 'Review before send: on' : 'Review before send: off'}
@@ -1195,7 +1205,7 @@ function MobilePage({
             </Button>
             <Button onClick={() => void captureFrame()} disabled={!cameraReady || uploading}>
               <ScanLine className="mr-2 h-4 w-4" />
-              {uploading ? 'Sending...' : reviewBeforeSend ? 'Capture for review' : 'Capture and send'}
+              {uploading ? 'Scanning...' : reviewBeforeSend ? 'Capture for review' : 'Capture and send'}
             </Button>
           </div>
 
@@ -1215,6 +1225,7 @@ function MobilePage({
             onChange={(event) => void handleFileUpload(event.target.files?.[0])}
           />
 
+          {uploading ? <p className="text-sm text-zinc-500 dark:text-zinc-400">Running OCR on the Mac...</p> : null}
           {error ? <p className="text-sm text-red-600">{error}</p> : null}
         </CardContent>
       </Card>
@@ -1230,7 +1241,7 @@ function MobilePage({
             </div>
             <div className="max-h-[70vh] space-y-4 overflow-y-auto px-4 py-4">
               <div className="grid gap-2">
-                <Label htmlFor="pending-regex-result">Regex result</Label>
+                <Label htmlFor="pending-regex-result">Detected value</Label>
                 <Input
                   id="pending-regex-result"
                   value={pendingDraftRegexResult}
@@ -1251,7 +1262,7 @@ function MobilePage({
                     />
                   </div>
                   <p className="rounded-md border border-dashed border-zinc-200 px-3 py-2 font-mono text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-                    Final match preview: {previewRegexResult || 'No regex match'}
+                    Final value preview: {previewRegexResult || 'No detected value'}
                   </p>
                   <p className="rounded-md border border-dashed border-zinc-200 px-3 py-2 font-mono text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
                     Final normalized text: {previewNormalizedText || 'No text'}
